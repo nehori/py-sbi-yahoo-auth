@@ -1,14 +1,9 @@
 #coding: utf-8
 from playwright.sync_api import sync_playwright
-from PIL import Image
-import pandas as pd
 import time
 import logging
 import re
 import os
-from bs4 import BeautifulSoup
-from io import StringIO
-from playwright.sync_api import TimeoutError
 
 # ログの設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s [%(filename)s:%(lineno)d]')
@@ -241,4 +236,5 @@ class SbiAuthenticator:
         if self.playwright:
             self.playwright.stop()
             self.playwright = None
+
             logger.info("Playwright stopped")
