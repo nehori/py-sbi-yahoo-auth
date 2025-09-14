@@ -21,7 +21,7 @@ Yahooメールを利用したSBI証券の二段階認証処理の自動化スク
     *   Clone: git clone https://github.com/yourusername/py-sbi-yahoo-auth.git
     *   Or download ZIP from this repository.
 2.  **Run:**
-    *  必要なライブラリをインストール: pip install playwright pillow pandas beautifulsoup4
+    *  必要なライブラリをインストール: pip install playwright
     *  環境変数またはコード内でSBI証券およびYahooメールの認証情報を設定
     *  以下のサンプルコードを参考に実行
 
