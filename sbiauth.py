@@ -70,21 +70,33 @@ class SbiAuthenticator:
         logger.info(f"Authentication code: {auth_code}")
         return auth_code
 
-    def mail_operation(self, browser):
+    def wait_for_inbox(self, page, timeout=100000):
+        """受信箱が表示されるまで待機する"""
+        try:
+            page.wait_for_function(
+                """
+                (text) => {
+                    const elements = document.querySelectorAll('span, div, a, h1');
+                    return Array.from(elements).some(el => el.innerText.includes(text));
+                }
+                """,
+                arg="受信箱",
+                timeout=timeout
+            )
+            logger.info("「受信箱」が表示されました")
+            return True
+        except TimeoutError:
+            logger.warning(f"タイムアウト: 「受信箱」が{timeout/1000}秒以内に表示されませんでした")
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "error_inbox.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+            page.screenshot(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "error_inbox.png"))
+            return False
+
+    def mail_operation(self, context):
         """
         Yahoo!メールを起動し、ログインを完了させる
-        戻り値: (context, page, new_tab)
+        戻り値: (page, new_tab)
         """
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 720},
-            java_script_enabled=True,
-            accept_downloads=True
-        )
-        
-        context.clear_cookies()
-        context.clear_permissions()
-
         page = context.new_page()
         page.goto(self.mail_url)
         time.sleep(2)
@@ -93,6 +105,17 @@ class SbiAuthenticator:
         new_tab.goto(self.mail_url)
         time.sleep(2)
 
+        # セッション保持により受信箱が既に表示されているか確認（タイムアウトしても続行）
+        try:
+            if self.wait_for_inbox(new_tab, timeout=10000):
+                logger.info("セッション保持によりログイン不要、メーラー起動処理 完了")
+                return page, new_tab
+            else:
+                logger.warning("受信箱の初期チェックでタイムアウト、ログイン処理に進みます")
+        except Exception as e:
+            logger.warning(f"受信箱の初期チェックでエラー: {type(e).__name__}: {e}、ログイン処理に進みます")
+
+        # ログイン処理
         new_tab.fill('input[name="handle"]', self.mail_username)
         new_tab.click('button[data-cl_cl_index="2"]')
         logger.info("ユーザ名入力処理 完了")
@@ -106,33 +129,17 @@ class SbiAuthenticator:
         # SMS認証設定画面が表示された場合、「あとで設定する」をクリック
         later_button = new_tab.query_selector('a:text("あとで設定する")')
         if later_button:
-            logger.error("SMS認証設定画面を検出、あとで設定するをクリック")
+            logger.info("SMS認証設定画面を検出、あとで設定するをクリック")
             later_button.click()
             time.sleep(2)
 
-        # 「受信箱」が表示されるまで待機
-        try:
-            new_tab.wait_for_function(
-                """
-                (text) => {
-                    const spans = document.querySelectorAll('span');
-                    return Array.from(spans).some(span => span.innerText.includes(text));
-                }
-                """,
-                arg="受信箱",
-                timeout=100000  # 最大100秒待機
-            )
-            logger.info("「受信箱」が表示されました")
-        except PlaywrightTimeoutError:
-            logger.warning("タイムアウト: 「受信箱」が100秒以内に表示されませんでした")
-            with open("error_inbox.html", "w", encoding="utf-8") as f:
-                f.write(new_tab.content())
-            new_tab.screenshot(path="error_inbox.png")
-            context.close()
+        # 受信箱が表示されるまで待機
+        if not self.wait_for_inbox(new_tab, timeout=100000):
+            logger.error("メーラー起動処理 失敗")
             return None, None
 
         logger.info("メーラー起動処理 完了")
-        return context, page, new_tab
+        return page, new_tab
 
     def process_email(self, new_tab, auth_id):
         """
@@ -234,31 +241,60 @@ class SbiAuthenticator:
         SBI証券にログインし、認証を完了してブラウザとページを返す
         戻り値: (playwright, browser, sbi_page)
         """
+        # スクリプトのディレクトリとuser_dataパスを設定
+        user_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data")
+        logger.info(f"user_data directory: {user_data_dir}")
+        os.makedirs(user_data_dir, exist_ok=True)
+
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=self.headless)
+        # 非匿名モードでChromiumを起動
+        self.browser = self.playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,  # lib/user_dataに保存
+            headless=self.headless,
+            args=["--disable-blink-features=AutomationControlled"],  # ボット検知回避
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            viewport={"width": 1500, "height": 1000},
+            locale="ja-JP",
+            timezone_id="Asia/Tokyo"
+        )
+        self.context = self.browser
+        self.context.set_default_timeout(180000)
 
         # 1. 最初にYahoo!メールを起動してログイン
         logger.info("Starting Yahoo! Mail login")
-        mail_context, mail_page, mail_tab = self.mail_operation(self.browser)
+        mail_page, mail_tab = self.mail_operation(self.context)
 
-        # 2. SBI証券にログインして認証キーを取得
-        self.context = self.browser.new_context(viewport={"width": 1500, "height": 1000})
-        self.context.set_default_timeout(180000)
-        self.sbi_page = self.login_to_sbi(self.context)
-        self.click_to_emailbottom(self.sbi_page)
-        auth_id = self.authenticate_sbi(self.sbi_page)
-
-        # 3. メールを確認して認証を進める
-        success = self.process_email(mail_tab, auth_id)
-        if not success:
+        if not mail_tab:
             logger.error("Email processing failed, aborting authentication")
             mail_page.close()
-            mail_context.close()
             self.close()
             return None, None, None
 
-        # 4. SBI証券側で認証を完了
-        self.click_to_certification(self.sbi_page)
+        # 2. SBI証券にログインして認証キーを取得
+        self.sbi_page = self.login_to_sbi(self.context)
+        
+        # 重要なお知らせ画面のチェック
+        notice_selector = 'div#titleSec.seeds-my-x-6.seeds-text-main h1:has-text("重要なお知らせ")'
+        try:
+            self.sbi_page.wait_for_selector(notice_selector, timeout=5000)
+            logger.info("重要なお知らせ画面を検出、認証キー取得処理をスキップ")
+        except Exception as e:
+            logger.info(f"重要なお知らせ画面は検出されず、通常の認証処理を続行: {type(e).__name__}: {e}")
+            try:
+                self.click_to_emailbottom(self.sbi_page)
+                auth_id = self.authenticate_sbi(self.sbi_page)
+                success = self.process_email(mail_tab, auth_id)
+                if not success:
+                    logger.error("Email processing failed, aborting authentication")
+                    mail_page.close()
+                    self.close()
+                    return None, None, None
+                self.click_to_certification(self.sbi_page)
+            except Exception as e:
+                logger.error(f"認証処理でエラー: {type(e).__name__}: {e}")
+                mail_page.close()
+                self.close()
+                return None, None, None
 
         # リダイレクトを待機
         redirect_url = "https://site1.sbisec.co.jp/ETGate/WPLEThmR001Control/DefaultPID/DefaultAID/DSWPLEThmR001Control"
@@ -269,9 +305,8 @@ class SbiAuthenticator:
         except Exception as e:
             logger.warning(f"Redirect wait failed: {e}. Proceeding with current URL: {self.sbi_page.url}")
 
-        # メールのコンテキストを閉じる
+        # メールのページを閉じる
         mail_page.close()
-        mail_context.close()
 
         return self.playwright, self.browser, self.sbi_page
 
